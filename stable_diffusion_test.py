@@ -9,10 +9,9 @@ pipe = StableDiffusionXLPipeline.from_pretrained(
     model_dir,
     torch_dtype=dtype,
     use_safetensors=True,
-    variant="fp16" if dtype == torch.float16 else None,  # 尽量加载fp16权重
+    variant="fp16" if dtype == torch.float16 else None,
 ).to(device)
 
-# 关键：保证 VAE 和主dtype一致（不要再用 float32）
 pipe.vae.to(dtype=dtype, device=device)
 pipe.unet.to(dtype=dtype, device=device)
 pipe.text_encoder.to(dtype=dtype, device=device)
