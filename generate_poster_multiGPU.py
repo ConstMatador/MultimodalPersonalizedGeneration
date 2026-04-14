@@ -295,9 +295,8 @@ def run_one_epoch(model, loader, optimizer, lpips_fn, cfg: TrainConfig, device, 
     model.train(train)
     total_loss, total_real, total_far, n = 0.0, 0.0, 0.0, 0
 
-    # pbar = tqdm(loader, desc="train" if train else "eval", disable=not is_main_process())
-    # for batch in pbar:
-    for batch in loader:
+    pbar = tqdm(loader, desc="train" if train else "eval", disable=not is_main_process())
+    for batch in pbar:
         movie_ids = batch["movie_id"]
         prompts = batch["prompt"]
         user_emb = batch["user_emb"].to(device, non_blocking=True)

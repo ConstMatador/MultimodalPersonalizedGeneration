@@ -9,4 +9,4 @@ python generate_poster.py \
   --epochs 10 \
   --batch_size 64 \
   --gpu 0 \
-  --max_summary_words 40
+  --max_summary_words 50
