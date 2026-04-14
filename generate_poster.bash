@@ -1,0 +1,12 @@
+python generate_poster.py \
+  --train_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_train_with_farthest.csv \
+  --val_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_val_with_farthest.csv \
+  --test_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_test_with_farthest.csv \
+  --summary_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/summary.csv \
+  --poster_dir /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/MoviePosters \
+  --output_dir save/PosterGenerator \
+  --test_save_dir TestPosters \
+  --epochs 10 \
+  --batch_size 64 \
+  --gpu 0 \
+  --max_summary_words 40

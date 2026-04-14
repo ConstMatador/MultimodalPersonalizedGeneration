@@ -1,0 +1,17 @@
+python train_two_tower.py \
+  --train_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/TwoTowerDataset/two_tower_train.csv \
+  --val_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/TwoTowerDataset/two_tower_val.csv \
+  --test_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/TwoTowerDataset/two_tower_test.csv \
+  --item_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/item_embeddings.csv \
+  --model_dir save/two_tower \
+  --metrics_dir save/two_tower \
+  --user_emb_csv_train /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_train.csv \
+  --user_emb_csv_val /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_val.csv \
+  --user_emb_csv_test /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_test.csv \
+  --embed_dim 256 \
+  --batch_size 256 \
+  --epochs 10 \
+  --lr 5e-4 \
+  --device cuda \
+  --gpu_id 0 \
+  --train_item_proj
