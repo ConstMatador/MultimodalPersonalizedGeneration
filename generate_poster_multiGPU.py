@@ -12,7 +12,10 @@ from tqdm import tqdm
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torchvision.utils import save_image
 
 import lpips
@@ -23,13 +26,44 @@ import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
-
 warnings.filterwarnings("ignore", message="The parameter 'pretrained' is deprecated.*")
 warnings.filterwarnings("ignore", message="Arguments other than a weight enum or `None` for 'weights' are deprecated.*")
 warnings.filterwarnings("ignore", message="`upcast_vae` is deprecated.*")
 
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["DIFFUSERS_VERBOSITY"] = "error"
+
+
+# -----------------------------
+# DDP Utils
+# -----------------------------
+def is_dist():
+    return dist.is_available() and dist.is_initialized()
+
+def get_rank():
+    return dist.get_rank() if is_dist() else 0
+
+def get_world_size():
+    return dist.get_world_size() if is_dist() else 1
+
+def is_main_process():
+    return get_rank() == 0
+
+def setup_distributed(local_rank):
+    dist.init_process_group(backend="nccl")
+    torch.cuda.set_device(local_rank)
+
+def cleanup_distributed():
+    if is_dist():
+        dist.destroy_process_group()
+
+def reduce_scalar(value: float, device: torch.device):
+    """all_reduce mean for python float"""
+    t = torch.tensor([value], dtype=torch.float64, device=device)
+    if is_dist():
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        t /= get_world_size()
+    return t.item()
 
 
 # -----------------------------
@@ -41,18 +75,20 @@ def seed_everything(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
+def seed_everything_rank(seed=42):
+    # 每个 rank 不同 seed，避免完全一致的数据增强/随机数
+    rank = get_rank()
+    seed_everything(seed + rank)
 
 def parse_embedding_str(s):
     if isinstance(s, list):
         return np.array(s, dtype=np.float32)
     return np.array(ast.literal_eval(s), dtype=np.float32)
 
-
 def load_summary_map(summary_csv):
     df = pd.read_csv(summary_csv)
     df["movieId"] = df["movieId"].astype(int)
     return dict(zip(df["movieId"], df["summary"].fillna("").astype(str)))
-
 
 def clean_and_truncate_summary(text: str, max_words: int = 35) -> str:
     if not isinstance(text, str):
@@ -60,16 +96,15 @@ def clean_and_truncate_summary(text: str, max_words: int = 35) -> str:
     text = text.replace("<|endoftext|>", " ")
     text = text.replace("\n", " ").replace("\t", " ")
     text = text.replace("!", " ")
-    text = " ".join(text.split())  # normalize spaces
+    text = " ".join(text.split())
     words = text.split(" ")
     return " ".join(words[:max_words])
-
 
 def image_to_tensor_01(pil_img, size=512):
     pil_img = pil_img.convert("RGB").resize((size, size), Image.BICUBIC)
     arr = np.asarray(pil_img).astype(np.float32) / 255.0
     arr = np.transpose(arr, (2, 0, 1))
-    return torch.from_numpy(arr)  # [3,H,W], [0,1]
+    return torch.from_numpy(arr)
 
 
 # -----------------------------
@@ -93,7 +128,6 @@ class UserPosterDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-
         movie_id = int(row["future_pos"])
         emb = parse_embedding_str(row["embedding"])
         far_emb = parse_embedding_str(row["farthest_embedding"])
@@ -116,7 +150,6 @@ class UserPosterDataset(Dataset):
             "far_emb": torch.tensor(far_emb, dtype=torch.float32),
             "real_img": real_img,
         }
-
 
 def collate_fn(batch):
     return {
@@ -170,7 +203,6 @@ class SDXLPosterPersonalizer(nn.Module):
         self.pipe.vae.requires_grad_(False)
         self.pipe.unet.requires_grad_(False)
 
-        # 与 SDXL prompt_embeds 对齐（关键）
         self.hidden_dim = self.pipe.unet.config.cross_attention_dim
 
         self.adapter = UserAdapter(
@@ -206,7 +238,7 @@ class SDXLPosterPersonalizer(nn.Module):
             width=width,
             output_type="pt"
         )
-        return out.images  # [B,3,H,W], [0,1]
+        return out.images
 
 
 # -----------------------------
@@ -235,29 +267,27 @@ class TrainConfig:
     gen_steps_train: int = 10
     gen_steps_eval: int = 15
     max_summary_words: int = 35
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    device: str = "cuda"
     seed: int = 42
-
 
 def save_test_posters(user_imgs, movie_ids, save_dir):
     os.makedirs(save_dir, exist_ok=True)
     for i in range(user_imgs.size(0)):
         movie_id = int(movie_ids[i])
-        save_path = os.path.join(save_dir, f"{movie_id}.jpg")  # future_pos.jpg
+        save_path = os.path.join(save_dir, f"{movie_id}.jpg")
         save_image(user_imgs[i].clamp(0, 1), save_path)
 
-
-def run_one_epoch(model, loader, optimizer, lpips_fn, cfg: TrainConfig, train=True, save_test_images=False):
+def run_one_epoch(model, loader, optimizer, lpips_fn, cfg: TrainConfig, device, train=True, save_test_images=False):
     model.train(train)
     total_loss, total_real, total_far, n = 0.0, 0.0, 0.0, 0
 
-    pbar = tqdm(loader, desc="train" if train else "eval")
+    pbar = tqdm(loader, desc="train" if train else "eval", disable=not is_main_process())
     for batch in pbar:
         movie_ids = batch["movie_id"]
         prompts = batch["prompt"]
-        user_emb = batch["user_emb"].to(cfg.device)
-        far_emb = batch["far_emb"].to(cfg.device)
-        real_img = batch["real_img"].to(cfg.device)
+        user_emb = batch["user_emb"].to(device, non_blocking=True)
+        far_emb = batch["far_emb"].to(device, non_blocking=True)
+        real_img = batch["real_img"].to(device, non_blocking=True)
 
         cond_user, pooled_user = model.build_cond(prompts, user_emb)
         user_img = model.generate_images(
@@ -283,11 +313,11 @@ def run_one_epoch(model, loader, optimizer, lpips_fn, cfg: TrainConfig, train=Tr
         loss = cfg.lpips_w_real * lp_real - cfg.lpips_w_far * lp_far
 
         if train:
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
 
-        if save_test_images and (not train):
+        if save_test_images and (not train) and is_main_process():
             save_test_posters(user_img.detach().cpu(), movie_ids, cfg.test_save_dir)
 
         bs = user_emb.size(0)
@@ -296,29 +326,38 @@ def run_one_epoch(model, loader, optimizer, lpips_fn, cfg: TrainConfig, train=Tr
         total_far += lp_far.item() * bs
         n += bs
 
-        pbar.set_postfix({
-            "loss": f"{total_loss / n:.4f}",
-            "lp_real": f"{total_real / n:.4f}",
-            "lp_far": f"{total_far / n:.4f}",
-        })
+        if is_main_process():
+            pbar.set_postfix({
+                "loss": f"{total_loss / n:.4f}",
+                "lp_real": f"{total_real / n:.4f}",
+                "lp_far": f"{total_far / n:.4f}",
+            })
 
+    # 全卡聚合（按样本加权）
+    stats = torch.tensor([total_loss, total_real, total_far, n], dtype=torch.float64, device=device)
+    if is_dist():
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+
+    total_loss_g, total_real_g, total_far_g, n_g = stats.tolist()
+    n_g = max(n_g, 1.0)
     return {
-        "loss": total_loss / max(n, 1),
-        "lp_real": total_real / max(n, 1),
-        "lp_far": total_far / max(n, 1),
+        "loss": total_loss_g / n_g,
+        "lp_real": total_real_g / n_g,
+        "lp_far": total_far_g / n_g,
     }
 
+def main(cfg: TrainConfig, local_rank: int):
+    setup_distributed(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
+    seed_everything_rank(cfg.seed)
 
-def main(cfg: TrainConfig):
-    seed_everything(cfg.seed)
-
-    # 关闭transformers/diffusers冗余警告（含截断提示）
     hf_logging.set_verbosity_error()
     logging.getLogger("transformers").setLevel(logging.ERROR)
     logging.getLogger("diffusers").setLevel(logging.ERROR)
 
-    os.makedirs(cfg.output_dir, exist_ok=True)
-    os.makedirs(cfg.test_save_dir, exist_ok=True)
+    if is_main_process():
+        os.makedirs(cfg.output_dir, exist_ok=True)
+        os.makedirs(cfg.test_save_dir, exist_ok=True)
 
     summary_map = load_summary_map(cfg.summary_csv)
 
@@ -326,45 +365,79 @@ def main(cfg: TrainConfig):
     val_set = UserPosterDataset(cfg.val_csv, summary_map, cfg.poster_dir, cfg.image_size, cfg.max_summary_words)
     test_set = UserPosterDataset(cfg.test_csv, summary_map, cfg.poster_dir, cfg.image_size, cfg.max_summary_words)
 
-    train_loader = DataLoader(train_set, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, collate_fn=collate_fn)
-    val_loader = DataLoader(val_set, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, collate_fn=collate_fn)
-    test_loader = DataLoader(test_set, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, collate_fn=collate_fn)
+    train_sampler = DistributedSampler(train_set, shuffle=True, drop_last=False)
+    val_sampler = DistributedSampler(val_set, shuffle=False, drop_last=False)
+    test_sampler = DistributedSampler(test_set, shuffle=False, drop_last=False)
 
-    print(f"Using device: {cfg.device}")
-    model = SDXLPosterPersonalizer(model_id=cfg.model_id, device=cfg.device, n_user_tokens=cfg.n_user_tokens)
+    train_loader = DataLoader(
+        train_set, batch_size=cfg.batch_size, sampler=train_sampler,
+        num_workers=cfg.num_workers, pin_memory=True, collate_fn=collate_fn
+    )
+    val_loader = DataLoader(
+        val_set, batch_size=cfg.batch_size, sampler=val_sampler,
+        num_workers=cfg.num_workers, pin_memory=True, collate_fn=collate_fn
+    )
+    test_loader = DataLoader(
+        test_set, batch_size=cfg.batch_size, sampler=test_sampler,
+        num_workers=cfg.num_workers, pin_memory=True, collate_fn=collate_fn
+    )
+
+    if is_main_process():
+        print(f"Using DDP world_size={get_world_size()}, local_rank={local_rank}, device={device}")
+
+    model = SDXLPosterPersonalizer(model_id=cfg.model_id, device=str(device), n_user_tokens=cfg.n_user_tokens)
+
+    # 只包 adapter 做 DDP（你只训练 adapter）
+    model.adapter = DDP(model.adapter, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
 
     optimizer = torch.optim.AdamW(model.adapter.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-    lpips_fn = lpips.LPIPS(net='vgg').to(cfg.device)
+    lpips_fn = lpips.LPIPS(net='vgg').to(device)
     lpips_fn.eval()
 
     best_val = float("inf")
 
     for epoch in range(1, cfg.epochs + 1):
-        print(f"\n===== Epoch {epoch}/{cfg.epochs} =====")
-        train_metrics = run_one_epoch(model, train_loader, optimizer, lpips_fn, cfg, train=True)
-        val_metrics = run_one_epoch(model, val_loader, optimizer=None, lpips_fn=lpips_fn, cfg=cfg, train=False)
+        train_sampler.set_epoch(epoch)
+        if is_main_process():
+            print(f"\n===== Epoch {epoch}/{cfg.epochs} =====")
 
-        print(f"[Train] loss={train_metrics['loss']:.4f}, lp_real={train_metrics['lp_real']:.4f}, lp_far={train_metrics['lp_far']:.4f}")
-        print(f"[Val]   loss={val_metrics['loss']:.4f}, lp_real={val_metrics['lp_real']:.4f}, lp_far={val_metrics['lp_far']:.4f}")
+        train_metrics = run_one_epoch(model, train_loader, optimizer, lpips_fn, cfg, device, train=True)
+        val_metrics = run_one_epoch(model, val_loader, optimizer=None, lpips_fn=lpips_fn, cfg=cfg, device=device, train=False)
 
-        torch.save(model.adapter.state_dict(), os.path.join(cfg.output_dir, "adapter_last.pt"))
-        if val_metrics["loss"] < best_val:
-            best_val = val_metrics["loss"]
-            best_path = os.path.join(cfg.output_dir, "adapter_best.pt")
-            torch.save(model.adapter.state_dict(), best_path)
-            print(f"Saved best checkpoint: {best_path}")
+        if is_main_process():
+            print(f"[Train] loss={train_metrics['loss']:.4f}, lp_real={train_metrics['lp_real']:.4f}, lp_far={train_metrics['lp_far']:.4f}")
+            print(f"[Val]   loss={val_metrics['loss']:.4f}, lp_real={val_metrics['lp_real']:.4f}, lp_far={val_metrics['lp_far']:.4f}")
+
+            # DDP 下取 module
+            adapter_state = model.adapter.module.state_dict()
+            torch.save(adapter_state, os.path.join(cfg.output_dir, "adapter_last.pt"))
+
+            if val_metrics["loss"] < best_val:
+                best_val = val_metrics["loss"]
+                best_path = os.path.join(cfg.output_dir, "adapter_best.pt")
+                torch.save(adapter_state, best_path)
+                print(f"Saved best checkpoint: {best_path}")
+
+    # 测试前同步，确保 best.pt 已保存
+    if is_dist():
+        dist.barrier()
 
     best_path = os.path.join(cfg.output_dir, "adapter_best.pt")
     if os.path.exists(best_path):
-        model.adapter.load_state_dict(torch.load(best_path, map_location=cfg.device))
-        print(f"Loaded best checkpoint from {best_path}")
+        state = torch.load(best_path, map_location=device)
+        model.adapter.module.load_state_dict(state)
+        if is_main_process():
+            print(f"Loaded best checkpoint from {best_path}")
 
     test_metrics = run_one_epoch(
         model, test_loader, optimizer=None, lpips_fn=lpips_fn, cfg=cfg,
-        train=False, save_test_images=True
+        device=device, train=False, save_test_images=True
     )
-    print(f"[Test]  loss={test_metrics['loss']:.4f}, lp_real={test_metrics['lp_real']:.4f}, lp_far={test_metrics['lp_far']:.4f}")
-    print(f"Generated test posters saved to: {cfg.test_save_dir}")
+    if is_main_process():
+        print(f"[Test]  loss={test_metrics['loss']:.4f}, lp_real={test_metrics['lp_real']:.4f}, lp_far={test_metrics['lp_far']:.4f}")
+        print(f"Generated test posters saved to: {cfg.test_save_dir}")
+
+    cleanup_distributed()
 
 
 if __name__ == "__main__":
@@ -377,21 +450,20 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="save/PosterGenerator")
     parser.add_argument("--test_save_dir", type=str, default="TestPosters")
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=2)  # 每卡 batch
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--image_size", type=int, default=512)
     parser.add_argument("--lpips_w_real", type=float, default=1.0)
     parser.add_argument("--lpips_w_far", type=float, default=0.5)
-    parser.add_argument("--gpu", type=int, default=None, help="GPU index, e.g. 0/1. If None, auto.")
     parser.add_argument("--max_summary_words", type=int, default=35)
+    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    if args.gpu is not None:
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is not available, but --gpu was specified.")
-        device_str = f"cuda:{args.gpu}"
-    else:
-        device_str = "cuda" if torch.cuda.is_available() else "cpu"
+    # torchrun 会注入 LOCAL_RANK
+    if "LOCAL_RANK" not in os.environ:
+        raise RuntimeError("Please launch with torchrun, e.g. CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 train.py ...")
+    local_rank = int(os.environ["LOCAL_RANK"])
 
     cfg = TrainConfig(
         train_csv=args.train_csv,
@@ -408,6 +480,7 @@ if __name__ == "__main__":
         lpips_w_real=args.lpips_w_real,
         lpips_w_far=args.lpips_w_far,
         max_summary_words=args.max_summary_words,
-        device=device_str,
+        num_workers=args.num_workers,
+        seed=args.seed,
     )
-    main(cfg)
+    main(cfg, local_rank)
