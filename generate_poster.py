@@ -231,8 +231,8 @@ class TrainConfig:
     lpips_w_real: float = 1.0
     lpips_w_far: float = 0.5
     n_user_tokens: int = 4
-    gen_steps_train: int = 20
-    gen_steps_eval: int = 30
+    gen_steps_train: int = 10
+    gen_steps_eval: int = 15
     max_summary_words: int = 35
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     seed: int = 42
