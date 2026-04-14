@@ -7,5 +7,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 generate_poster_multiGP
   --output_dir save/PosterGenerator \
   --test_save_dir TestPosters \
   --epochs 10 \
-  --batch_size 64 \
+  --train_batch_size 50 \
+  --val_batch_size 25 \
+  --test_batch_size 25 \
   --max_summary_words 40

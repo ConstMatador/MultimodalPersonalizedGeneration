@@ -4,6 +4,7 @@ import random
 import argparse
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 
 import pandas as pd
 import numpy as np
@@ -58,7 +59,6 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 def reduce_scalar(value: float, device: torch.device):
-    """all_reduce mean for python float"""
     t = torch.tensor([value], dtype=torch.float64, device=device)
     if is_dist():
         dist.all_reduce(t, op=dist.ReduceOp.SUM)
@@ -76,7 +76,6 @@ def seed_everything(seed=42):
     torch.cuda.manual_seed_all(seed)
 
 def seed_everything_rank(seed=42):
-    # 每个 rank 不同 seed，避免完全一致的数据增强/随机数
     rank = get_rank()
     seed_everything(seed + rank)
 
@@ -99,6 +98,14 @@ def clean_and_truncate_summary(text: str, max_words: int = 35) -> str:
     text = " ".join(text.split())
     words = text.split(" ")
     return " ".join(words[:max_words])
+
+def bj_now_str():
+    bj_tz = timezone(timedelta(hours=8))
+    return datetime.now(bj_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+def print_bj(msg: str):
+    if is_main_process():
+        print(f"[{bj_now_str()} 北京时间] {msg}")
 
 def image_to_tensor_01(pil_img, size=512):
     pil_img = pil_img.convert("RGB").resize((size, size), Image.BICUBIC)
@@ -198,6 +205,11 @@ class SDXLPosterPersonalizer(nn.Module):
         ).to(device)
 
         self.pipe.set_progress_bar_config(disable=True)
+
+        # 可选：进一步省显存
+        # self.pipe.enable_attention_slicing()
+        # self.pipe.enable_vae_slicing()
+
         self.pipe.text_encoder.requires_grad_(False)
         self.pipe.text_encoder_2.requires_grad_(False)
         self.pipe.vae.requires_grad_(False)
@@ -256,7 +268,9 @@ class TrainConfig:
 
     model_id: str = "/root/TOS/ZhongzhengWang/model/stable-diffusion-xl-base-1.0"
     image_size: int = 512
-    batch_size: int = 2
+    train_batch_size: int = 2
+    val_batch_size: int = 1
+    test_batch_size: int = 1
     num_workers: int = 2
     epochs: int = 5
     lr: float = 1e-4
@@ -281,28 +295,45 @@ def run_one_epoch(model, loader, optimizer, lpips_fn, cfg: TrainConfig, device, 
     model.train(train)
     total_loss, total_real, total_far, n = 0.0, 0.0, 0.0, 0
 
-    pbar = tqdm(loader, desc="train" if train else "eval", disable=not is_main_process())
-    for batch in pbar:
+    # pbar = tqdm(loader, desc="train" if train else "eval", disable=not is_main_process())
+    # for batch in pbar:
+    for batch in loader:
         movie_ids = batch["movie_id"]
         prompts = batch["prompt"]
         user_emb = batch["user_emb"].to(device, non_blocking=True)
         far_emb = batch["far_emb"].to(device, non_blocking=True)
         real_img = batch["real_img"].to(device, non_blocking=True)
 
-        cond_user, pooled_user = model.build_cond(prompts, user_emb)
-        user_img = model.generate_images(
-            cond_user, pooled_user,
-            height=cfg.image_size, width=cfg.image_size,
-            steps=cfg.gen_steps_train if train else cfg.gen_steps_eval
-        )
-
-        with torch.no_grad():
-            cond_far, pooled_far = model.build_cond(prompts, far_emb)
-            far_img = model.generate_images(
-                cond_far, pooled_far,
+        if train:
+            cond_user, pooled_user = model.build_cond(prompts, user_emb)
+            user_img = model.generate_images(
+                cond_user, pooled_user,
                 height=cfg.image_size, width=cfg.image_size,
-                steps=cfg.gen_steps_train if train else cfg.gen_steps_eval
+                steps=cfg.gen_steps_train
             )
+
+            with torch.no_grad():
+                cond_far, pooled_far = model.build_cond(prompts, far_emb)
+                far_img = model.generate_images(
+                    cond_far, pooled_far,
+                    height=cfg.image_size, width=cfg.image_size,
+                    steps=cfg.gen_steps_train
+                )
+        else:
+            with torch.inference_mode():
+                cond_user, pooled_user = model.build_cond(prompts, user_emb)
+                user_img = model.generate_images(
+                    cond_user, pooled_user,
+                    height=cfg.image_size, width=cfg.image_size,
+                    steps=cfg.gen_steps_eval
+                )
+
+                cond_far, pooled_far = model.build_cond(prompts, far_emb)
+                far_img = model.generate_images(
+                    cond_far, pooled_far,
+                    height=cfg.image_size, width=cfg.image_size,
+                    steps=cfg.gen_steps_eval
+                )
 
         user_img_m1 = user_img * 2 - 1
         far_img_m1 = far_img * 2 - 1
@@ -333,7 +364,6 @@ def run_one_epoch(model, loader, optimizer, lpips_fn, cfg: TrainConfig, device, 
                 "lp_far": f"{total_far / n:.4f}",
             })
 
-    # 全卡聚合（按样本加权）
     stats = torch.tensor([total_loss, total_real, total_far, n], dtype=torch.float64, device=device)
     if is_dist():
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
@@ -370,25 +400,45 @@ def main(cfg: TrainConfig, local_rank: int):
     test_sampler = DistributedSampler(test_set, shuffle=False, drop_last=False)
 
     train_loader = DataLoader(
-        train_set, batch_size=cfg.batch_size, sampler=train_sampler,
-        num_workers=cfg.num_workers, pin_memory=True, collate_fn=collate_fn
+        train_set,
+        batch_size=cfg.train_batch_size,
+        sampler=train_sampler,
+        num_workers=cfg.num_workers,
+        pin_memory=True,
+        collate_fn=collate_fn
     )
     val_loader = DataLoader(
-        val_set, batch_size=cfg.batch_size, sampler=val_sampler,
-        num_workers=cfg.num_workers, pin_memory=True, collate_fn=collate_fn
+        val_set,
+        batch_size=cfg.val_batch_size,
+        sampler=val_sampler,
+        num_workers=cfg.num_workers,
+        pin_memory=True,
+        collate_fn=collate_fn
     )
     test_loader = DataLoader(
-        test_set, batch_size=cfg.batch_size, sampler=test_sampler,
-        num_workers=cfg.num_workers, pin_memory=True, collate_fn=collate_fn
+        test_set,
+        batch_size=cfg.test_batch_size,
+        sampler=test_sampler,
+        num_workers=cfg.num_workers,
+        pin_memory=True,
+        collate_fn=collate_fn
     )
 
-    if is_main_process():
-        print(f"Using DDP world_size={get_world_size()}, local_rank={local_rank}, device={device}")
+    print_bj(f"Using DDP world_size={get_world_size()}, local_rank={local_rank}, device={device}")
+    print_bj(
+        f"train_batch_size={cfg.train_batch_size}, "
+        f"val_batch_size={cfg.val_batch_size}, "
+        f"test_batch_size={cfg.test_batch_size}"
+    )
 
     model = SDXLPosterPersonalizer(model_id=cfg.model_id, device=str(device), n_user_tokens=cfg.n_user_tokens)
 
-    # 只包 adapter 做 DDP（你只训练 adapter）
-    model.adapter = DDP(model.adapter, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+    model.adapter = DDP(
+        model.adapter,
+        device_ids=[local_rank],
+        output_device=local_rank,
+        find_unused_parameters=False
+    )
 
     optimizer = torch.optim.AdamW(model.adapter.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     lpips_fn = lpips.LPIPS(net='vgg').to(device)
@@ -398,17 +448,19 @@ def main(cfg: TrainConfig, local_rank: int):
 
     for epoch in range(1, cfg.epochs + 1):
         train_sampler.set_epoch(epoch)
+        print_bj(f"===== Epoch {epoch}/{cfg.epochs} =====")
+
+        train_metrics = run_one_epoch(
+            model, train_loader, optimizer, lpips_fn, cfg, device, train=True
+        )
+        val_metrics = run_one_epoch(
+            model, val_loader, optimizer=None, lpips_fn=lpips_fn, cfg=cfg, device=device, train=False
+        )
+
         if is_main_process():
-            print(f"\n===== Epoch {epoch}/{cfg.epochs} =====")
+            print_bj(f"[Train] loss={train_metrics['loss']:.4f}, lp_real={train_metrics['lp_real']:.4f}, lp_far={train_metrics['lp_far']:.4f}")
+            print_bj(f"[Val]   loss={val_metrics['loss']:.4f}, lp_real={val_metrics['lp_real']:.4f}, lp_far={val_metrics['lp_far']:.4f}")
 
-        train_metrics = run_one_epoch(model, train_loader, optimizer, lpips_fn, cfg, device, train=True)
-        val_metrics = run_one_epoch(model, val_loader, optimizer=None, lpips_fn=lpips_fn, cfg=cfg, device=device, train=False)
-
-        if is_main_process():
-            print(f"[Train] loss={train_metrics['loss']:.4f}, lp_real={train_metrics['lp_real']:.4f}, lp_far={train_metrics['lp_far']:.4f}")
-            print(f"[Val]   loss={val_metrics['loss']:.4f}, lp_real={val_metrics['lp_real']:.4f}, lp_far={val_metrics['lp_far']:.4f}")
-
-            # DDP 下取 module
             adapter_state = model.adapter.module.state_dict()
             torch.save(adapter_state, os.path.join(cfg.output_dir, "adapter_last.pt"))
 
@@ -416,9 +468,8 @@ def main(cfg: TrainConfig, local_rank: int):
                 best_val = val_metrics["loss"]
                 best_path = os.path.join(cfg.output_dir, "adapter_best.pt")
                 torch.save(adapter_state, best_path)
-                print(f"Saved best checkpoint: {best_path}")
+                print_bj(f"Saved best checkpoint: {best_path}")
 
-    # 测试前同步，确保 best.pt 已保存
     if is_dist():
         dist.barrier()
 
@@ -427,15 +478,15 @@ def main(cfg: TrainConfig, local_rank: int):
         state = torch.load(best_path, map_location=device)
         model.adapter.module.load_state_dict(state)
         if is_main_process():
-            print(f"Loaded best checkpoint from {best_path}")
+            print_bj(f"Loaded best checkpoint from {best_path}")
 
     test_metrics = run_one_epoch(
         model, test_loader, optimizer=None, lpips_fn=lpips_fn, cfg=cfg,
         device=device, train=False, save_test_images=True
     )
     if is_main_process():
-        print(f"[Test]  loss={test_metrics['loss']:.4f}, lp_real={test_metrics['lp_real']:.4f}, lp_far={test_metrics['lp_far']:.4f}")
-        print(f"Generated test posters saved to: {cfg.test_save_dir}")
+        print_bj(f"[Test]  loss={test_metrics['loss']:.4f}, lp_real={test_metrics['lp_real']:.4f}, lp_far={test_metrics['lp_far']:.4f}")
+        print_bj(f"Generated test posters saved to: {cfg.test_save_dir}")
 
     cleanup_distributed()
 
@@ -450,7 +501,11 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="save/PosterGenerator")
     parser.add_argument("--test_save_dir", type=str, default="TestPosters")
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--batch_size", type=int, default=2)  # 每卡 batch
+
+    parser.add_argument("--train_batch_size", type=int, default=2)
+    parser.add_argument("--val_batch_size", type=int, default=1)
+    parser.add_argument("--test_batch_size", type=int, default=1)
+
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--image_size", type=int, default=512)
     parser.add_argument("--lpips_w_real", type=float, default=1.0)
@@ -460,7 +515,6 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    # torchrun 会注入 LOCAL_RANK
     if "LOCAL_RANK" not in os.environ:
         raise RuntimeError("Please launch with torchrun, e.g. CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 train.py ...")
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -474,7 +528,9 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         test_save_dir=args.test_save_dir,
         epochs=args.epochs,
-        batch_size=args.batch_size,
+        train_batch_size=args.train_batch_size,
+        val_batch_size=args.val_batch_size,
+        test_batch_size=args.test_batch_size,
         lr=args.lr,
         image_size=args.image_size,
         lpips_w_real=args.lpips_w_real,
