@@ -17,7 +17,7 @@ pipe.unet.to(dtype=dtype, device=device)
 pipe.text_encoder.to(dtype=dtype, device=device)
 pipe.text_encoder_2.to(dtype=dtype, device=device)
 
-prompt = "title: Departed, The (2006) | genres: Crime|Drama|Thriller | introduction: To take down South Boston's Irish Mafia, the police send in one of their own to infiltrate the underworld, not realizing the syndicate has done likewise. While an undercover cop curries favor with the mob kingpin, a career criminal rises through the police ranks. But both sides soon discover there's a mole among them."
+prompt = "Twelve Monkeys (a.k.a. 12 Monkeys) (1995): James Cole in dystopian future, questioning psychiatrist Dr. Railly, shadowy figures of the Army of the 12 Monkeys loom, tense and mysterious atmosphere."
 negative_prompt = "low quality, blurry, watermark"
 
 image = pipe(

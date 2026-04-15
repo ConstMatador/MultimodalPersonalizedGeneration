@@ -3,8 +3,8 @@ python train_two_tower.py \
   --val_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/TwoTowerDataset/two_tower_val.csv \
   --test_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/TwoTowerDataset/two_tower_test.csv \
   --item_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/item_embeddings.csv \
-  --model_dir save/two_tower \
-  --metrics_dir save/two_tower \
+  --model_dir save/TwoTower \
+  --metrics_dir save/TwoTower \
   --user_emb_csv_train /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_train.csv \
   --user_emb_csv_val /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_val.csv \
   --user_emb_csv_test /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_test.csv \
