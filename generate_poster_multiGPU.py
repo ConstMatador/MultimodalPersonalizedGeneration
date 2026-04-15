@@ -237,10 +237,11 @@ class SDXLPosterPersonalizer(nn.Module):
     def build_cond(self, prompts, user_emb_256):
         prompt_embeds, pooled_prompt_embeds = self.encode_prompt(prompts)
         user_tokens = self.adapter(user_emb_256)
-        cond = torch.cat([user_tokens, prompt_embeds, user_tokens], dim=1)
+        # cond = torch.cat([user_tokens, prompt_embeds], dim=1)
+        cond = prompt_embeds
         return cond, pooled_prompt_embeds
 
-    def generate_images(self, cond_embeds, pooled_embeds, height=512, width=512, steps=20, guidance_scale=0.0):
+    def generate_images(self, cond_embeds, pooled_embeds, height=512, width=512, steps=20, guidance_scale=7.0):
         out = self.pipe(
             prompt_embeds=cond_embeds,
             pooled_prompt_embeds=pooled_embeds,
@@ -267,7 +268,7 @@ class TrainConfig:
     test_save_dir: str = "TestPosters"
 
     model_id: str = "/root/TOS/ZhongzhengWang/model/stable-diffusion-xl-base-1.0"
-    image_size: int = 512
+    image_size: int = 1024
     train_batch_size: int = 2
     val_batch_size: int = 1
     test_batch_size: int = 1
@@ -278,9 +279,9 @@ class TrainConfig:
     lpips_w_real: float = 1.0
     lpips_w_far: float = 0.5
     n_user_tokens: int = 4
-    gen_steps_train: int = 10
-    gen_steps_eval: int = 15
-    max_summary_words: int = 35
+    gen_steps_train: int = 30
+    gen_steps_eval: int = 40
+    max_summary_words: int = 40
     device: str = "cuda"
     seed: int = 42
 
@@ -445,6 +446,35 @@ def main(cfg: TrainConfig, local_rank: int):
 
     best_val = float("inf")
 
+    # -----------------------------
+    # Test before training
+    # -----------------------------
+    pre_test_dir = os.path.join(cfg.test_save_dir, "BeforeTrain")
+    if is_main_process():
+        os.makedirs(pre_test_dir, exist_ok=True)
+        print_bj("===== Test before training =====")
+
+    if is_dist():
+        dist.barrier()
+
+    old_test_save_dir = cfg.test_save_dir
+    cfg.test_save_dir = pre_test_dir
+
+    pre_test_metrics = run_one_epoch(
+        model, test_loader, optimizer=None, lpips_fn=lpips_fn, cfg=cfg,
+        device=device, train=False, save_test_images=True
+    )
+
+    if is_main_process():
+        print_bj(
+            f"[Pre-Test] loss={pre_test_metrics['loss']:.4f}, "
+            f"lp_real={pre_test_metrics['lp_real']:.4f}, "
+            f"lp_far={pre_test_metrics['lp_far']:.4f}"
+        )
+        print_bj(f"Generated pre-train test posters saved to: {cfg.test_save_dir}")
+
+    cfg.test_save_dir = old_test_save_dir
+
     for epoch in range(1, cfg.epochs + 1):
         train_sampler.set_epoch(epoch)
         print_bj(f"===== Epoch {epoch}/{cfg.epochs} =====")
@@ -479,13 +509,34 @@ def main(cfg: TrainConfig, local_rank: int):
         if is_main_process():
             print_bj(f"Loaded best checkpoint from {best_path}")
 
+    # -----------------------------
+    # Test after training
+    # -----------------------------
+    post_test_dir = os.path.join(cfg.test_save_dir, "AfterTrain")
+    if is_main_process():
+        os.makedirs(post_test_dir, exist_ok=True)
+        print_bj("===== Test after training =====")
+
+    if is_dist():
+        dist.barrier()
+
+    old_test_save_dir = cfg.test_save_dir
+    cfg.test_save_dir = post_test_dir
+
     test_metrics = run_one_epoch(
         model, test_loader, optimizer=None, lpips_fn=lpips_fn, cfg=cfg,
         device=device, train=False, save_test_images=True
     )
+
     if is_main_process():
-        print_bj(f"[Test]  loss={test_metrics['loss']:.4f}, lp_real={test_metrics['lp_real']:.4f}, lp_far={test_metrics['lp_far']:.4f}")
-        print_bj(f"Generated test posters saved to: {cfg.test_save_dir}")
+        print_bj(
+            f"[Post-Test] loss={test_metrics['loss']:.4f}, "
+            f"lp_real={test_metrics['lp_real']:.4f}, "
+            f"lp_far={test_metrics['lp_far']:.4f}"
+        )
+        print_bj(f"Generated post-train test posters saved to: {cfg.test_save_dir}")
+
+    cfg.test_save_dir = old_test_save_dir
 
     cleanup_distributed()
 
