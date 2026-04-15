@@ -125,7 +125,7 @@ class UserPosterDataset(Dataset):
         self.image_size = image_size
         self.max_summary_words = max_summary_words
 
-        needed = ["future_pos", "embedding", "farthest_embedding"]
+        needed = ["row_id", "future_pos", "embedding", "farthest_embedding"]
         for c in needed:
             if c not in self.df.columns:
                 raise ValueError(f"{csv_path} missing column: {c}")
@@ -135,6 +135,7 @@ class UserPosterDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
+        row_id = int(row["row_id"])
         movie_id = int(row["future_pos"])
         emb = parse_embedding_str(row["embedding"])
         far_emb = parse_embedding_str(row["farthest_embedding"])
@@ -151,6 +152,7 @@ class UserPosterDataset(Dataset):
         real_img = image_to_tensor_01(real_img, self.image_size)
 
         return {
+            "row_id": row_id,
             "movie_id": movie_id,
             "prompt": prompt,
             "user_emb": torch.tensor(emb, dtype=torch.float32),
@@ -160,6 +162,7 @@ class UserPosterDataset(Dataset):
 
 def collate_fn(batch):
     return {
+        "row_id": [b["row_id"] for b in batch],
         "movie_id": [b["movie_id"] for b in batch],
         "prompt": [b["prompt"] for b in batch],
         "user_emb": torch.stack([b["user_emb"] for b in batch], dim=0),
@@ -172,7 +175,7 @@ def collate_fn(batch):
 # Adapter
 # -----------------------------
 class UserAdapter(nn.Module):
-    def __init__(self, in_dim=256, hidden=1024, out_dim=2048, n_user_tokens=4, dropout=0.1):
+    def __init__(self, in_dim=256, hidden=1024, out_dim=2048, n_user_tokens=1, dropout=0.1):
         super().__init__()
         self.n_user_tokens = n_user_tokens
         self.out_dim = out_dim
@@ -237,8 +240,8 @@ class SDXLPosterPersonalizer(nn.Module):
     def build_cond(self, prompts, user_emb_256):
         prompt_embeds, pooled_prompt_embeds = self.encode_prompt(prompts)
         user_tokens = self.adapter(user_emb_256)
-        # cond = torch.cat([user_tokens, prompt_embeds], dim=1)
-        cond = prompt_embeds
+        cond = torch.cat([user_tokens, prompt_embeds], dim=1)
+        # cond = prompt_embeds
         return cond, pooled_prompt_embeds
 
     def generate_images(self, cond_embeds, pooled_embeds, height=512, width=512, steps=20, guidance_scale=7.0):
@@ -277,7 +280,7 @@ class TrainConfig:
     lr: float = 1e-4
     weight_decay: float = 1e-4
     lpips_w_real: float = 1.0
-    lpips_w_far: float = 0.5
+    lpips_w_far: float = 0.2
     n_user_tokens: int = 4
     gen_steps_train: int = 30
     gen_steps_eval: int = 40
@@ -285,11 +288,11 @@ class TrainConfig:
     device: str = "cuda"
     seed: int = 42
 
-def save_test_posters(user_imgs, movie_ids, save_dir):
+def save_test_posters(user_imgs, row_ids, save_dir):
     os.makedirs(save_dir, exist_ok=True)
     for i in range(user_imgs.size(0)):
-        movie_id = int(movie_ids[i])
-        save_path = os.path.join(save_dir, f"{movie_id}.jpg")
+        row_id = int(row_ids[i])
+        save_path = os.path.join(save_dir, f"{row_id}.jpg")
         save_image(user_imgs[i].clamp(0, 1), save_path)
 
 def run_one_epoch(model, loader, optimizer, lpips_fn, cfg: TrainConfig, device, train=True, save_test_images=False):
@@ -298,6 +301,7 @@ def run_one_epoch(model, loader, optimizer, lpips_fn, cfg: TrainConfig, device, 
 
     pbar = tqdm(loader, desc="train" if train else "eval", disable=not is_main_process())
     for batch in pbar:
+        row_ids = batch["row_id"]
         movie_ids = batch["movie_id"]
         prompts = batch["prompt"]
         user_emb = batch["user_emb"].to(device, non_blocking=True)
@@ -349,7 +353,7 @@ def run_one_epoch(model, loader, optimizer, lpips_fn, cfg: TrainConfig, device, 
             optimizer.step()
 
         if save_test_images and (not train) and is_main_process():
-            save_test_posters(user_img.detach().cpu(), movie_ids, cfg.test_save_dir)
+            save_test_posters(user_img.detach().cpu(), row_ids, cfg.test_save_dir)
 
         bs = user_emb.size(0)
         total_loss += loss.item() * bs
