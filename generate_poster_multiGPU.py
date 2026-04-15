@@ -352,7 +352,7 @@ def run_one_epoch(model, loader, optimizer, lpips_fn, cfg: TrainConfig, device, 
             loss.backward()
             optimizer.step()
 
-        if save_test_images and (not train) and is_main_process():
+        if save_test_images and (not train):
             save_test_posters(user_img.detach().cpu(), row_ids, cfg.test_save_dir)
 
         bs = user_emb.size(0)
