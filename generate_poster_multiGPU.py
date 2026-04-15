@@ -105,7 +105,7 @@ def bj_now_str():
 
 def print_bj(msg: str):
     if is_main_process():
-        print(f"[{bj_now_str()} 北京时间] {msg}")
+        print(f"[{bj_now_str()} Beijing] {msg}")
 
 def image_to_tensor_01(pil_img, size=512):
     pil_img = pil_img.convert("RGB").resize((size, size), Image.BICUBIC)
