@@ -58,13 +58,6 @@ def cleanup_distributed():
     if is_dist():
         dist.destroy_process_group()
 
-def reduce_scalar(value: float, device: torch.device):
-    t = torch.tensor([value], dtype=torch.float64, device=device)
-    if is_dist():
-        dist.all_reduce(t, op=dist.ReduceOp.SUM)
-        t /= get_world_size()
-    return t.item()
-
 
 # -----------------------------
 # Utils
@@ -142,7 +135,8 @@ class UserPosterDataset(Dataset):
 
         summary_raw = self.summary_map.get(movie_id, "")
         summary = clean_and_truncate_summary(summary_raw, max_words=self.max_summary_words)
-        prompt = f"Movie poster. {summary}" if summary else "Movie poster."
+
+        prompt = f"No text in the poster! {summary}" if summary else "cinematic key art, no text"
 
         poster_path = os.path.join(self.poster_dir, f"{movie_id}.jpg")
         if not os.path.exists(poster_path):
@@ -209,10 +203,6 @@ class SDXLPosterPersonalizer(nn.Module):
 
         self.pipe.set_progress_bar_config(disable=True)
 
-        # 可选：进一步省显存
-        # self.pipe.enable_attention_slicing()
-        # self.pipe.enable_vae_slicing()
-
         self.pipe.text_encoder.requires_grad_(False)
         self.pipe.text_encoder_2.requires_grad_(False)
         self.pipe.vae.requires_grad_(False)
@@ -227,27 +217,64 @@ class SDXLPosterPersonalizer(nn.Module):
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.pipe.vae_scale_factor)
 
     @torch.no_grad()
-    def encode_prompt(self, prompts):
-        prompt_embeds, _, pooled_prompt_embeds, _ = self.pipe.encode_prompt(
+    def encode_prompt_with_neg(self, prompts, negative_prompts):
+        (
+            prompt_embeds,
+            negative_prompt_embeds,
+            pooled_prompt_embeds,
+            negative_pooled_prompt_embeds
+        ) = self.pipe.encode_prompt(
             prompt=prompts,
             prompt_2=prompts,
+            negative_prompt=negative_prompts,
+            negative_prompt_2=negative_prompts,
             device=self.device,
             num_images_per_prompt=1,
-            do_classifier_free_guidance=False
+            do_classifier_free_guidance=True
         )
-        return prompt_embeds, pooled_prompt_embeds
+        return prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds
 
-    def build_cond(self, prompts, user_emb_256):
-        prompt_embeds, pooled_prompt_embeds = self.encode_prompt(prompts)
-        user_tokens = self.adapter(user_emb_256)
-        cond = torch.cat([user_tokens, prompt_embeds], dim=1)
-        # cond = prompt_embeds
-        return cond, pooled_prompt_embeds
+    def build_cond(self, prompts, user_emb_256, negative_prompts, use_user_tokens=True):
+        use_user_tokens = False
 
-    def generate_images(self, cond_embeds, pooled_embeds, height=512, width=512, steps=20, guidance_scale=7.0):
+        prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = \
+            self.encode_prompt_with_neg(prompts, negative_prompts)
+
+        if use_user_tokens:
+            user_tokens = self.adapter(user_emb_256)  # [B, n_user_tokens, C]
+            cond_embeds = torch.cat([user_tokens, prompt_embeds], dim=1)  # [B, 77+n, C]
+
+            neg_prefix = torch.zeros(
+                negative_prompt_embeds.size(0),
+                user_tokens.size(1),
+                negative_prompt_embeds.size(2),
+                device=negative_prompt_embeds.device,
+                dtype=negative_prompt_embeds.dtype
+            )
+            negative_cond_embeds = torch.cat([neg_prefix, negative_prompt_embeds], dim=1)  # [B, 77+n, C]
+        else:
+            cond_embeds = prompt_embeds.clone()
+            negative_cond_embeds = negative_prompt_embeds.clone()
+
+        return cond_embeds, negative_cond_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds
+
+
+    def generate_images(
+        self,
+        cond_embeds,
+        negative_embeds,
+        pooled_embeds,
+        negative_pooled_embeds,
+        height=512,
+        width=512,
+        steps=20,
+        guidance_scale=5.0
+    ):
         out = self.pipe(
             prompt_embeds=cond_embeds,
+            negative_prompt_embeds=negative_embeds,
             pooled_prompt_embeds=pooled_embeds,
+            negative_pooled_prompt_embeds=negative_pooled_embeds,
             num_inference_steps=steps,
             guidance_scale=guidance_scale,
             height=height,
@@ -271,7 +298,7 @@ class TrainConfig:
     test_save_dir: str = "TestPosters"
 
     model_id: str = "/root/TOS/ZhongzhengWang/model/stable-diffusion-xl-base-1.0"
-    image_size: int = 1024
+    image_size: int = 512
     train_batch_size: int = 2
     val_batch_size: int = 1
     test_batch_size: int = 1
@@ -280,10 +307,13 @@ class TrainConfig:
     lr: float = 1e-4
     weight_decay: float = 1e-4
     lpips_w_real: float = 1.0
-    lpips_w_far: float = 0.2
+    lpips_w_far: float = 0.5
     n_user_tokens: int = 4
     gen_steps_train: int = 30
-    gen_steps_eval: int = 40
+    gen_steps_eval: int = 50
+    guidance_scale_train: float = 5.0
+    guidance_scale_eval: float = 5.0
+    negative_prompt: str = "text, words, letters, typography, font, title, subtitle, caption, logo, watermark, signature, username, numbers, symbols"
     max_summary_words: int = 40
     device: str = "cuda"
     seed: int = 42
@@ -302,41 +332,46 @@ def run_one_epoch(model, loader, optimizer, lpips_fn, cfg: TrainConfig, device, 
     pbar = tqdm(loader, desc="train" if train else "eval", disable=not is_main_process())
     for batch in pbar:
         row_ids = batch["row_id"]
-        movie_ids = batch["movie_id"]
         prompts = batch["prompt"]
+        negative_prompts = [cfg.negative_prompt] * len(prompts)
+
         user_emb = batch["user_emb"].to(device, non_blocking=True)
         far_emb = batch["far_emb"].to(device, non_blocking=True)
         real_img = batch["real_img"].to(device, non_blocking=True)
 
         if train:
-            cond_user, pooled_user = model.build_cond(prompts, user_emb)
+            cond_user, neg_user, pooled_user, neg_pooled_user = model.build_cond(prompts, user_emb, negative_prompts)
             user_img = model.generate_images(
-                cond_user, pooled_user,
+                cond_user, neg_user, pooled_user, neg_pooled_user,
                 height=cfg.image_size, width=cfg.image_size,
-                steps=cfg.gen_steps_train
+                steps=cfg.gen_steps_train,
+                guidance_scale=cfg.guidance_scale_train
             )
 
             with torch.no_grad():
-                cond_far, pooled_far = model.build_cond(prompts, far_emb)
+                cond_far, neg_far, pooled_far, neg_pooled_far = model.build_cond(prompts, far_emb, negative_prompts)
                 far_img = model.generate_images(
-                    cond_far, pooled_far,
+                    cond_far, neg_far, pooled_far, neg_pooled_far,
                     height=cfg.image_size, width=cfg.image_size,
-                    steps=cfg.gen_steps_train
+                    steps=cfg.gen_steps_train,
+                    guidance_scale=cfg.guidance_scale_train
                 )
         else:
             with torch.inference_mode():
-                cond_user, pooled_user = model.build_cond(prompts, user_emb)
+                cond_user, neg_user, pooled_user, neg_pooled_user = model.build_cond(prompts, user_emb, negative_prompts)
                 user_img = model.generate_images(
-                    cond_user, pooled_user,
+                    cond_user, neg_user, pooled_user, neg_pooled_user,
                     height=cfg.image_size, width=cfg.image_size,
-                    steps=cfg.gen_steps_eval
+                    steps=cfg.gen_steps_eval,
+                    guidance_scale=cfg.guidance_scale_eval
                 )
 
-                cond_far, pooled_far = model.build_cond(prompts, far_emb)
+                cond_far, neg_far, pooled_far, neg_pooled_far = model.build_cond(prompts, far_emb, negative_prompts)
                 far_img = model.generate_images(
-                    cond_far, pooled_far,
+                    cond_far, neg_far, pooled_far, neg_pooled_far,
                     height=cfg.image_size, width=cfg.image_size,
-                    steps=cfg.gen_steps_eval
+                    steps=cfg.gen_steps_eval,
+                    guidance_scale=cfg.guidance_scale_eval
                 )
 
         user_img_m1 = user_img * 2 - 1
@@ -404,28 +439,16 @@ def main(cfg: TrainConfig, local_rank: int):
     test_sampler = DistributedSampler(test_set, shuffle=False, drop_last=False)
 
     train_loader = DataLoader(
-        train_set,
-        batch_size=cfg.train_batch_size,
-        sampler=train_sampler,
-        num_workers=cfg.num_workers,
-        pin_memory=True,
-        collate_fn=collate_fn
+        train_set, batch_size=cfg.train_batch_size, sampler=train_sampler,
+        num_workers=cfg.num_workers, pin_memory=True, collate_fn=collate_fn
     )
     val_loader = DataLoader(
-        val_set,
-        batch_size=cfg.val_batch_size,
-        sampler=val_sampler,
-        num_workers=cfg.num_workers,
-        pin_memory=True,
-        collate_fn=collate_fn
+        val_set, batch_size=cfg.val_batch_size, sampler=val_sampler,
+        num_workers=cfg.num_workers, pin_memory=True, collate_fn=collate_fn
     )
     test_loader = DataLoader(
-        test_set,
-        batch_size=cfg.test_batch_size,
-        sampler=test_sampler,
-        num_workers=cfg.num_workers,
-        pin_memory=True,
-        collate_fn=collate_fn
+        test_set, batch_size=cfg.test_batch_size, sampler=test_sampler,
+        num_workers=cfg.num_workers, pin_memory=True, collate_fn=collate_fn
     )
 
     print_bj(f"Using DDP world_size={get_world_size()}, local_rank={local_rank}, device={device}")
@@ -567,6 +590,15 @@ if __name__ == "__main__":
     parser.add_argument("--max_summary_words", type=int, default=35)
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
+
+    # 新增：控制 CFG 和负面词
+    parser.add_argument("--guidance_scale_train", type=float, default=5.0)
+    parser.add_argument("--guidance_scale_eval", type=float, default=5.0)
+    parser.add_argument("--negative_prompt", type=str, default=(
+        "text, words, letters, typography, font, title, subtitle, caption, "
+        "logo, watermark, signature, username, numbers, symbols"
+    ))
+
     args = parser.parse_args()
 
     if "LOCAL_RANK" not in os.environ:
@@ -592,5 +624,8 @@ if __name__ == "__main__":
         max_summary_words=args.max_summary_words,
         num_workers=args.num_workers,
         seed=args.seed,
+        guidance_scale_train=args.guidance_scale_train,
+        guidance_scale_eval=args.guidance_scale_eval,
+        negative_prompt=args.negative_prompt,
     )
     main(cfg, local_rank)
