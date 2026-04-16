@@ -12,18 +12,18 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 generate_poster_SDXL.py
   --test_batch_size 25 \
   --max_summary_words 50
 
-# nohup bash -c '
-# CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 generate_poster_SDXL.py \
-#   --train_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_train_subset_with_farthest.csv \
-#   --val_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_val_subset_with_farthest.csv \
-#   --test_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_test_subset_with_farthest.csv \
-#   --summary_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/summary_subset.csv \
-#   --poster_dir /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/MoviePosters \
-#   --output_dir save/PosterGenerator \
-#   --test_save_dir TestPosters \
-#   --epochs 10 \
-#   --train_batch_size 25 \
-#   --val_batch_size 25 \
-#   --test_batch_size 25 \
-#   --max_summary_words 50
-# ' > log/train.log 2>&1 &
+nohup bash -c '
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 generate_poster_SDXL.py \
+  --train_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_train_subset_with_farthest.csv \
+  --val_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_val_subset_with_farthest.csv \
+  --test_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_test_subset_with_farthest.csv \
+  --summary_csv /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/summary_subset.csv \
+  --poster_dir /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/MoviePosters \
+  --output_dir save/PosterGenerator \
+  --test_save_dir TestPosters \
+  --epochs 10 \
+  --train_batch_size 25 \
+  --val_batch_size 25 \
+  --test_batch_size 25 \
+  --max_summary_words 50
+' > log/train.log 2>&1 &
