@@ -8,7 +8,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 generate_poster_FLUX.py
   --output_dir save/PosterGenerator \
   --test_save_dir TestPosters \
   --epochs 10 \
-  --train_batch_size 25 \
-  --val_batch_size 25 \
-  --test_batch_size 25 \
+  --train_batch_size 20 \
+  --val_batch_size 20 \
+  --test_batch_size 20 \
   --max_summary_words 50

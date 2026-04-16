@@ -137,7 +137,9 @@ class UserPosterDataset(Dataset):
         summary = clean_and_truncate_summary(summary, self.max_summary_words)
 
         prompt = (
-            "A cinematic movie poster, high quality, visually striking, no text, no letters, no typography. "
+            "Create a movie poster for a film. "
+            "This image must be a cinematic movie poster composition, not a film still, not a screenshot, not a random illustration. "
+            "A visually striking, high-quality theatrical movie poster, dramatic lighting, polished composition, poster-style layout, no text, no letters, no typography, no words, no logo. "
             f"Plot summary: {summary}"
         )
 
@@ -380,11 +382,11 @@ class TrainConfig:
     lpips_w_real: float = 1.0
     lpips_w_far: float = 0.5
     n_user_tokens: int = 4
-    gen_steps_train: int = 30
-    gen_steps_eval: int = 50
+    gen_steps_train: int = 8
+    gen_steps_eval: int = 12
     guidance_scale_train: float = 5.0
     guidance_scale_eval: float = 5.0
-    negative_prompt: str = "text, words, letters, typography, font, title, subtitle, caption, logo, watermark, signature, username, numbers, symbols"
+    negative_prompt: str = ""
     max_summary_words: int = 40
     device: str = "cuda"
     seed: int = 42
