@@ -3,11 +3,14 @@ import re
 import math
 import time
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+
 import pandas as pd
 from PIL import Image
 from tqdm import tqdm
 import torch
 from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+
 import warnings
 warnings.filterwarnings(
     "ignore",
@@ -64,7 +67,7 @@ def load_model_and_processor(model_path: str, dtype: str = "bfloat16", max_pixel
     processor = AutoProcessor.from_pretrained(
         model_path,
         trust_remote_code=True,
-        min_pixels=256 * 28 * 28,
+        min_pixels=128 * 28 * 28,
         max_pixels=max_pixels
     )
 
@@ -92,9 +95,17 @@ def postprocess_text(gen_text: str, title: str, max_words: int = 50) -> str:
     return s
 
 
+def load_rgb_image(path: str):
+    with Image.open(path) as img:
+        return img.convert("RGB")
+
+
 @torch.no_grad()
-def generate_batch(model, processor, image_paths, titles, max_new_tokens=48):
-    images = [Image.open(p).convert("RGB") for p in image_paths]
+def generate_batch(model, processor, image_paths, titles, max_new_tokens=48, num_image_workers=8):
+    worker_num = max(1, min(num_image_workers, len(image_paths)))
+
+    with ThreadPoolExecutor(max_workers=worker_num) as executor:
+        images = list(executor.map(load_rgb_image, image_paths))
 
     messages = []
     for title in titles:
@@ -152,7 +163,6 @@ def main(args):
     if "movieId" not in df.columns or "info" not in df.columns:
         raise ValueError("input csv must contain columns: movieId, info")
 
-    # ===== Resume: 读取已有结果 =====
     existing_ids = set()
     if os.path.exists(args.output_csv):
         try:
@@ -206,19 +216,30 @@ def main(args):
 
         try:
             descriptions = generate_batch(
-                model, processor, img_paths, titles, args.max_new_tokens
+                model,
+                processor,
+                img_paths,
+                titles,
+                args.max_new_tokens,
+                args.num_image_workers
             )
         except RuntimeError as e:
             print(f"\n[WARN] batch {bi} failed: {e}")
             torch.cuda.empty_cache()
             descriptions = []
             for _, title, ip in batch:
-                d = generate_batch(model, processor, [ip], [title])[0]
+                d = generate_batch(
+                    model,
+                    processor,
+                    [ip],
+                    [title],
+                    args.max_new_tokens,
+                    args.num_image_workers
+                )[0]
                 descriptions.append(d)
 
         batch_time = time.time() - t0
 
-        # ===== 实时写入 =====
         batch_records = [
             {"movieId": mid, "description": desc}
             for mid, desc in zip(movie_ids, descriptions)
@@ -243,7 +264,8 @@ def main(args):
 
         if (bi + 1) % args.log_every == 0:
             print(f"\n[INFO] batch {bi+1}/{n_batch} done")
-            print(f"[INFO] sample: {movie_ids[0]} -> {descriptions[0]}")
+            if len(movie_ids) > 0 and len(descriptions) > 0:
+                print(f"[INFO] sample: {movie_ids[0]} -> {descriptions[0]}")
 
     print(f"\nDone. Output saved to: {args.output_csv}")
 
@@ -257,13 +279,14 @@ if __name__ == "__main__":
 
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--max_new_tokens", type=int, default=100)
+    parser.add_argument("--max_new_tokens", type=int, default=48)
 
     parser.add_argument("--dtype", type=str, default="bfloat16",
                         choices=["bfloat16", "float16", "float32"])
 
-    parser.add_argument("--max_pixels", type=int, default=256 * 28 * 28)
+    parser.add_argument("--max_pixels", type=int, default=128 * 28 * 28)
     parser.add_argument("--log_every", type=int, default=20)
+    parser.add_argument("--num_image_workers", type=int, default=8)
 
     args = parser.parse_args()
     main(args)
