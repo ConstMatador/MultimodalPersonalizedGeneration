@@ -1,0 +1,4 @@
+Total rows in csv: 22009
+Remaining samples to process: 22009
+Missing posters: 0
+Loading checkpoint shards:   0%|          | 0/14 [00:00<?, ?it/s]Loading checkpoint shards:   7%|▋         | 1/14 [00:13<02:55, 13.47s/it]Loading checkpoint shards:  14%|█▍        | 2/14 [00:26<02:37, 13.15s/it]Loading checkpoint shards:  21%|██▏       | 3/14 [00:36<02:11, 11.94s/it]Loading checkpoint shards:  29%|██▊       | 4/14 [00:55<02:25, 14.56s/it]Loading checkpoint shards:  36%|███▌      | 5/14 [01:13<02:23, 15.99s/it]Loading checkpoint shards:  43%|████▎     | 6/14 [01:33<02:16, 17.09s/it]Loading checkpoint shards:  50%|█████     | 7/14 [01:50<02:01, 17.29s/it]
