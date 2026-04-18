@@ -101,7 +101,7 @@ def load_rgb_image(path: str):
 
 
 @torch.no_grad()
-def generate_batch(model, processor, image_paths, titles, max_new_tokens=48, num_image_workers=8):
+def generate_batch(model, processor, image_paths, titles, max_new_tokens=100, num_image_workers=8):
     worker_num = max(1, min(num_image_workers, len(image_paths)))
 
     with ThreadPoolExecutor(max_workers=worker_num) as executor:
@@ -279,7 +279,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--max_new_tokens", type=int, default=48)
+    parser.add_argument("--max_new_tokens", type=int, default=100)
 
     parser.add_argument("--dtype", type=str, default="bfloat16",
                         choices=["bfloat16", "float16", "float32"])
