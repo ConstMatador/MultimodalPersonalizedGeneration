@@ -304,8 +304,6 @@ class FLUXPosterPersonalizer(nn.Module):
         )
 
     def build_cond(self, prompts, user_emb_256, negative_prompts, use_user_tokens=True):
-        use_user_tokens = False
-
         prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = \
             self.encode_prompt_with_neg(prompts, negative_prompts)
 
@@ -369,7 +367,6 @@ class TrainConfig:
     poster_dir: str
     output_dir: str = "save/PosterGenerator"
     test_save_dir: str = "TestPosters"
-
     model_id: str = "/root/TOS/ZhongzhengWang/model/FLUX.1-dev"
     image_size: int = 512
     train_batch_size: int = 2

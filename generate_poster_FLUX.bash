@@ -7,7 +7,7 @@
 #   --poster_dir /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/MoviePosters \
 #   --output_dir save/PosterGenerator \
 #   --test_save_dir TestPosters \
-#   --epochs 10 \
+#   --epochs 5 \
 #   --train_batch_size 10 \
 #   --val_batch_size 10 \
 #   --test_batch_size 10 \
@@ -23,7 +23,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 generate_poster_FLUX.py
   --poster_dir /root/TOS/ZhongzhengWang/dataset/MovieLensLatest/MoviePosters \
   --output_dir save/PosterGenerator \
   --test_save_dir TestPosters \
-  --epochs 10 \
+  --epochs 5 \
   --train_batch_size 10 \
   --val_batch_size 10 \
   --test_batch_size 10 \
