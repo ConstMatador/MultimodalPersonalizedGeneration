@@ -77,12 +77,12 @@ def parse_embedding_str(s):
         return np.array(s, dtype=np.float32)
     return np.array(ast.literal_eval(s), dtype=np.float32)
 
-def load_summary_map(summary_csv):
-    df = pd.read_csv(summary_csv)
+def load_description_map(description_csv):
+    df = pd.read_csv(description_csv)
     df["movieId"] = df["movieId"].astype(int)
-    return dict(zip(df["movieId"], df["summary"].fillna("").astype(str)))
+    return dict(zip(df["movieId"], df["description"].fillna("").astype(str)))
 
-def clean_and_truncate_summary(text: str, max_words: int = 35) -> str:
+def clean_and_truncate_description(text: str, max_words: int = 35) -> str:
     if not isinstance(text, str):
         return ""
     text = text.replace("<|endoftext|>", " ")
@@ -111,12 +111,12 @@ def image_to_tensor_01(pil_img, size=512):
 # Dataset
 # -----------------------------
 class UserPosterDataset(Dataset):
-    def __init__(self, csv_path, summary_map, poster_dir, image_size=512, max_summary_words=35):
+    def __init__(self, csv_path, description_map, poster_dir, image_size=512, max_description_words=35):
         self.df = pd.read_csv(csv_path)
-        self.summary_map = summary_map
+        self.description_map = description_map
         self.poster_dir = poster_dir
         self.image_size = image_size
-        self.max_summary_words = max_summary_words
+        self.max_description_words = max_description_words
 
         needed = ["row_id", "future_pos", "embedding", "farthest_embedding"]
         for c in needed:
@@ -133,14 +133,14 @@ class UserPosterDataset(Dataset):
         emb = parse_embedding_str(row["embedding"])
         far_emb = parse_embedding_str(row["farthest_embedding"])
 
-        summary = self.summary_map.get(movie_id, "")
-        summary = clean_and_truncate_summary(summary, self.max_summary_words)
+        description = self.description_map.get(movie_id, "")
+        description = clean_and_truncate_description(description, self.max_description_words)
 
         prompt = (
             "Create a movie poster for a film. "
             "This image must be a cinematic movie poster composition, not a film still, not a screenshot, not a random illustration. "
             "A visually striking, high-quality theatrical movie poster, dramatic lighting, polished composition, poster-style layout, no text, no letters, no typography, no words, no logo. "
-            f"Plot summary: {summary}"
+            f"Plot description: {description}"
         )
 
         poster_path = os.path.join(self.poster_dir, f"{movie_id}.jpg")
@@ -365,7 +365,7 @@ class TrainConfig:
     train_csv: str
     val_csv: str
     test_csv: str
-    summary_csv: str
+    description_csv: str
     poster_dir: str
     output_dir: str = "save/PosterGenerator"
     test_save_dir: str = "TestPosters"
@@ -387,7 +387,7 @@ class TrainConfig:
     guidance_scale_train: float = 5.0
     guidance_scale_eval: float = 5.0
     negative_prompt: str = ""
-    max_summary_words: int = 40
+    max_description_words: int = 100
     device: str = "cuda"
     seed: int = 42
 
@@ -502,11 +502,11 @@ def main(cfg: TrainConfig, local_rank: int):
             os.makedirs(cfg.output_dir, exist_ok=True)
             os.makedirs(cfg.test_save_dir, exist_ok=True)
 
-        summary_map = load_summary_map(cfg.summary_csv)
+        description_map = load_description_map(cfg.description_csv)
 
-        train_set = UserPosterDataset(cfg.train_csv, summary_map, cfg.poster_dir, cfg.image_size, cfg.max_summary_words)
-        val_set = UserPosterDataset(cfg.val_csv, summary_map, cfg.poster_dir, cfg.image_size, cfg.max_summary_words)
-        test_set = UserPosterDataset(cfg.test_csv, summary_map, cfg.poster_dir, cfg.image_size, cfg.max_summary_words)
+        train_set = UserPosterDataset(cfg.train_csv, description_map, cfg.poster_dir, cfg.image_size, cfg.max_description_words)
+        val_set = UserPosterDataset(cfg.val_csv, description_map, cfg.poster_dir, cfg.image_size, cfg.max_description_words)
+        test_set = UserPosterDataset(cfg.test_csv, description_map, cfg.poster_dir, cfg.image_size, cfg.max_description_words)
 
         train_sampler = DistributedSampler(train_set, shuffle=True, drop_last=False)
         val_sampler = DistributedSampler(val_set, shuffle=False, drop_last=False)
@@ -648,7 +648,7 @@ if __name__ == "__main__":
     parser.add_argument("--train_csv", type=str, default="/root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embedding_train_with_farthest.csv")
     parser.add_argument("--val_csv", type=str, default="/root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_val_with_farthest.csv")
     parser.add_argument("--test_csv", type=str, default="/root/TOS/ZhongzhengWang/dataset/MovieLensLatest/UserEmbeddings/user_embeddings_test_with_farthest.csv")
-    parser.add_argument("--summary_csv", type=str, default="/root/TOS/ZhongzhengWang/dataset/MovieLensLatest/summary.csv")
+    parser.add_argument("--description_csv", type=str, default="/root/TOS/ZhongzhengWang/dataset/MovieLensLatest/description.csv")
     parser.add_argument("--poster_dir", type=str, default="/root/TOS/ZhongzhengWang/dataset/MovieLensLatest/MoviePosters")
     parser.add_argument("--output_dir", type=str, default="save/PosterGenerator")
     parser.add_argument("--test_save_dir", type=str, default="TestPosters")
@@ -662,7 +662,7 @@ if __name__ == "__main__":
     parser.add_argument("--image_size", type=int, default=512)
     parser.add_argument("--lpips_w_real", type=float, default=1.0)
     parser.add_argument("--lpips_w_far", type=float, default=0.5)
-    parser.add_argument("--max_summary_words", type=int, default=35)
+    parser.add_argument("--max_description_words", type=int, default=35)
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
 
@@ -686,7 +686,7 @@ if __name__ == "__main__":
         train_csv=args.train_csv,
         val_csv=args.val_csv,
         test_csv=args.test_csv,
-        summary_csv=args.summary_csv,
+        description_csv=args.description_csv,
         poster_dir=args.poster_dir,
         output_dir=args.output_dir,
         test_save_dir=args.test_save_dir,
@@ -698,7 +698,7 @@ if __name__ == "__main__":
         image_size=args.image_size,
         lpips_w_real=args.lpips_w_real,
         lpips_w_far=args.lpips_w_far,
-        max_summary_words=args.max_summary_words,
+        max_description_words=args.max_description_words,
         num_workers=args.num_workers,
         seed=args.seed,
         guidance_scale_train=args.guidance_scale_train,
